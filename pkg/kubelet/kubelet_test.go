@@ -66,7 +66,7 @@ import (
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/kubelet/util/queue"
 	kubeletvolume "k8s.io/kubernetes/pkg/kubelet/volumemanager"
-	schedulercache "k8s.io/kubernetes/pkg/scheduler/cache"
+	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/awsebs"
@@ -75,6 +75,7 @@ import (
 	_ "k8s.io/kubernetes/pkg/volume/host_path"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 	"k8s.io/kubernetes/pkg/volume/util"
+	"k8s.io/kubernetes/pkg/volume/util/subpath"
 )
 
 func init() {
@@ -176,6 +177,7 @@ func newTestKubeletWithImageList(
 	kubelet.heartbeatClient = fakeKubeClient
 	kubelet.os = &containertest.FakeOS{}
 	kubelet.mounter = &mount.FakeMounter{}
+	kubelet.subpather = &subpath.FakeSubpath{}
 
 	kubelet.hostname = testKubeletHostname
 	kubelet.nodeName = types.NodeName(testKubeletHostname)
@@ -264,7 +266,8 @@ func newTestKubeletWithImageList(
 		kubelet.resourceAnalyzer,
 		kubelet.podManager,
 		kubelet.runtimeCache,
-		fakeRuntime)
+		fakeRuntime,
+		kubelet.statusManager)
 	fakeImageGCPolicy := images.ImageGCPolicy{
 		HighThresholdPercent: 90,
 		LowThresholdPercent:  80,
@@ -302,7 +305,7 @@ func newTestKubeletWithImageList(
 		Namespace: "",
 	}
 	// setup eviction manager
-	evictionManager, evictionAdmitHandler := eviction.NewManager(kubelet.resourceAnalyzer, eviction.Config{}, killPodNow(kubelet.podWorkers, fakeRecorder), kubelet.imageManager, kubelet.containerGC, fakeRecorder, nodeRef, kubelet.clock)
+	evictionManager, evictionAdmitHandler := eviction.NewManager(kubelet.resourceAnalyzer, eviction.Config{}, killPodNow(kubelet.podWorkers, fakeRecorder), kubelet.podManager.GetMirrorPodByPod, kubelet.imageManager, kubelet.containerGC, fakeRecorder, nodeRef, kubelet.clock)
 
 	kubelet.evictionManager = evictionManager
 	kubelet.admitHandlers.AddPodAdmitHandler(evictionAdmitHandler)
@@ -659,7 +662,7 @@ func TestHandlePluginResources(t *testing.T) {
 	}
 	kl.nodeInfo = testNodeInfo{nodes: nodes}
 
-	updatePluginResourcesFunc := func(node *schedulercache.NodeInfo, attrs *lifecycle.PodAdmitAttributes) error {
+	updatePluginResourcesFunc := func(node *schedulernodeinfo.NodeInfo, attrs *lifecycle.PodAdmitAttributes) error {
 		// Maps from resourceName to the value we use to set node.allocatableResource[resourceName].
 		// A resource with invalid value (< 0) causes the function to return an error
 		// to emulate resource Allocation failure.

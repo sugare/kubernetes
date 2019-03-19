@@ -46,10 +46,12 @@ import (
 	"k8s.io/kube-aggregator/pkg/controllers"
 )
 
+// ServiceResolver knows how to convert a service reference into an actual location.
 type ServiceResolver interface {
 	ResolveEndpoint(namespace, name string) (*url.URL, error)
 }
 
+// AvailableConditionController handles checking the availability of registered API services.
 type AvailableConditionController struct {
 	apiServiceClient apiregistrationclient.APIServicesGetter
 
@@ -72,6 +74,7 @@ type AvailableConditionController struct {
 	queue workqueue.RateLimitingInterface
 }
 
+// NewAvailableConditionController returns a new AvailableConditionController.
 func NewAvailableConditionController(
 	apiServiceInformer informers.APIServiceInformer,
 	serviceInformer v1informers.ServiceInformer,
@@ -283,9 +286,33 @@ func updateAPIServiceStatus(client apiregistrationclient.APIServicesGetter, orig
 	if equality.Semantic.DeepEqual(originalAPIService.Status, newAPIService.Status) {
 		return newAPIService, nil
 	}
-	return client.APIServices().UpdateStatus(newAPIService)
+
+	newAPIService, err := client.APIServices().UpdateStatus(newAPIService)
+	if err != nil {
+		return nil, err
+	}
+
+	// update metrics
+	wasAvailable := apiregistration.IsAPIServiceConditionTrue(originalAPIService, apiregistration.Available)
+	isAvailable := apiregistration.IsAPIServiceConditionTrue(newAPIService, apiregistration.Available)
+	if isAvailable != wasAvailable {
+		if isAvailable {
+			unavailableGauge.WithLabelValues(newAPIService.Name).Set(0.0)
+		} else {
+			unavailableGauge.WithLabelValues(newAPIService.Name).Set(1.0)
+
+			reason := "UnknownReason"
+			if newCondition := apiregistration.GetAPIServiceConditionByType(newAPIService, apiregistration.Available); newCondition != nil {
+				reason = newCondition.Reason
+			}
+			unavailableCounter.WithLabelValues(newAPIService.Name, reason).Inc()
+		}
+	}
+
+	return newAPIService, nil
 }
 
+// Run starts the AvailableConditionController loop which manages the availability condition of API services.
 func (c *AvailableConditionController) Run(threadiness int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer c.queue.ShutDown()
